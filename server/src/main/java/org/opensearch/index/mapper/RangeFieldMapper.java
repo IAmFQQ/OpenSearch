@@ -34,6 +34,8 @@ package org.opensearch.index.mapper;
 
 import org.apache.lucene.document.InvertableType;
 import org.apache.lucene.document.StoredValue;
+import org.apache.lucene.index.BinaryDocValues;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.search.BoostQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
@@ -63,6 +65,7 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -456,6 +459,31 @@ public class RangeFieldMapper extends ParametrizedFieldMapper {
     @Override
     public RangeFieldType fieldType() {
         return (RangeFieldType) super.fieldType();
+    }
+
+    @Override
+    protected DerivedFieldGenerator derivedFieldGenerator() {
+        return new DerivedFieldGenerator(mappedFieldType, new FieldValueFetcher(simpleName()) {
+            @Override
+            public List<Object> fetch(LeafReader reader, int docId) throws IOException {
+                List<Object> values = new ArrayList<>();
+                org.apache.lucene.index.BinaryDocValues dv = reader.getBinaryDocValues(mappedFieldType.name());
+                if (dv != null && dv.advanceExact(docId)) {
+                    org.apache.lucene.util.BytesRef bytes = dv.binaryValue();
+                    if (bytes != null && bytes.length > 0) {
+                        for (Range range : fieldType().rangeType.decodeRanges(bytes)) {
+                            values.add(range.toString());
+                        }
+                    }
+                }
+                return values;
+            }
+        }, null) {
+            @Override
+            public FieldValueType getDerivedFieldPreference() {
+                return FieldValueType.DOC_VALUES;
+            }
+        };
     }
 
     @Override

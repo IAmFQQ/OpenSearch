@@ -77,16 +77,23 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.Randomness;
 import org.opensearch.common.ValidationException;
 import org.opensearch.common.collect.Tuple;
+import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.lease.Releasable;
+import org.opensearch.core.xcontent.DeprecationHandler;
+import org.opensearch.core.xcontent.MediaType;
+import org.opensearch.core.xcontent.NamedXContentRegistry;
+import org.opensearch.core.xcontent.XContentParser;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.AtomicArray;
 import org.opensearch.common.util.concurrent.ConcurrentCollections;
 import org.opensearch.core.Assertions;
+import org.opensearch.core.common.bytes.BytesReference;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexNotFoundException;
+import org.opensearch.index.IndexSortConfig;
 import org.opensearch.index.IndexingPressureService;
 import org.opensearch.index.VersionType;
 import org.opensearch.index.seqno.SequenceNumbers;
@@ -107,10 +114,12 @@ import org.opensearch.threadpool.ThreadPool.Names;
 import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.node.NodeClient;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -688,6 +697,19 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
                         );
                     }
                     if (shardId == null) {
+                        // route_on_sort_fields: use sort field values instead of _id for routing,
+                        // colocating docs with the same sort key on the same shard for better RLE compression
+                        if (docWriteRequest.routing() == null
+                            && indexMetaData.getSettings()
+                                .getAsBoolean("index.logsdb.route_on_sort_fields", false)
+                            && (docWriteRequest.opType() == DocWriteRequest.OpType.INDEX
+                                || docWriteRequest.opType() == DocWriteRequest.OpType.CREATE)) {
+                            String sortFieldRouting = extractSortFieldRouting(
+                                (IndexRequest) docWriteRequest, indexMetaData);
+                            if (sortFieldRouting != null) {
+                                docWriteRequest.routing(sortFieldRouting);
+                            }
+                        }
                         shardId = clusterService.operationRouting()
                             .indexShards(clusterState, concreteIndex.getName(), docWriteRequest.id(), docWriteRequest.routing())
                             .shardId();
@@ -1043,6 +1065,139 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
             }
         }
         return new Tuple<>(shardRoutings, node2Shards);
+    }
+
+    /**
+     * Extracts sort field values from the source to use as a routing key.
+     * Uses a streaming XContentParser to avoid full source materialization.
+     * {@code @timestamp} is skipped because it's too granular for colocation.
+     *
+     * @return the joined sort field values, or null if no sort fields are configured
+     */
+    static String extractSortFieldRouting(IndexRequest request, IndexMetadata indexMetadata) {
+        List<String> sortFields = IndexSortConfig.INDEX_SORT_FIELD_SETTING.get(indexMetadata.getSettings());
+        if (sortFields.isEmpty() || request.source() == null) {
+            return null;
+        }
+
+        List<String> targetFields = new ArrayList<>();
+        for (String f : sortFields) {
+            if ("@timestamp".equals(f) == false) {
+                targetFields.add(f);
+            }
+        }
+        if (targetFields.isEmpty()) {
+            return null;
+        }
+
+        try {
+            Map<String, String> values = streamExtractFields(
+                request.source(), request.getContentType(), targetFields
+            );
+            if (values.isEmpty()) {
+                return null;
+            }
+            StringBuilder sb = new StringBuilder();
+            for (String f : targetFields) {
+                String v = values.get(f);
+                if (v != null) {
+                    if (sb.length() > 0) sb.append('\0');
+                    sb.append(v);
+                }
+            }
+            return sb.length() > 0 ? sb.toString() : null;
+        } catch (Exception e) {
+            logger.debug("Failed to extract sort field routing", e);
+            return null;
+        }
+    }
+
+    /**
+     * Uses a streaming XContentParser to extract only the specified dotted-path fields
+     * from the source JSON, avoiding full {@code convertToMap} materialization.
+     */
+    private static Map<String, String> streamExtractFields(
+        BytesReference source, MediaType contentType, List<String> fields
+    ) throws IOException {
+        Map<String, String> result = new LinkedHashMap<>();
+
+        // Group field paths by their root component for one-pass extraction
+        Map<String, Map<String, String>> rootIndex = new LinkedHashMap<>();
+        for (String field : fields) {
+            int dot = field.indexOf('.');
+            String root = dot > 0 ? field.substring(0, dot) : field;
+            String suffix = dot > 0 ? field.substring(dot + 1) : "";
+            rootIndex.computeIfAbsent(root, k -> new LinkedHashMap<>()).put(suffix, field);
+        }
+
+        XContentParser parser = XContentHelper.createParser(
+            NamedXContentRegistry.EMPTY, DeprecationHandler.THROW_UNSUPPORTED_OPERATION,
+            source, contentType
+        );
+        XContentParser.Token token;
+        while ((token = parser.nextToken()) != null) {
+            if (token == XContentParser.Token.FIELD_NAME) {
+                String rootField = parser.currentName();
+                Map<String, String> children = rootIndex.get(rootField);
+                parser.nextToken();
+                if (children != null) {
+                    streamExtractValue(parser, children, result);
+                } else {
+                    parser.skipChildren();
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Recursively extracts field values from the current parser position.
+     * The parser is positioned on the value or START_OBJECT for the matched root field.
+     *
+     * @param parser          positioned on field value or START_OBJECT
+     * @param suffixToPath    maps suffix paths to full dotted field paths
+     * @param result          output map (fullPath -> value)
+     */
+    private static void streamExtractValue(
+        XContentParser parser, Map<String, String> suffixToPath, Map<String, String> result
+    ) throws IOException {
+        // Handle leaf value (suffix "" means the current field is the target)
+        for (Map.Entry<String, String> e : suffixToPath.entrySet()) {
+            if (e.getKey().isEmpty() && parser.currentToken().isValue()) {
+                result.put(e.getValue(), parser.textOrNull());
+                return;
+            }
+        }
+
+        if (parser.currentToken() != XContentParser.Token.START_OBJECT) {
+            parser.skipChildren();
+            return;
+        }
+
+        // Group remaining suffixes by next path segment
+        Map<String, Map<String, String>> next = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : suffixToPath.entrySet()) {
+            String suffix = e.getKey();
+            if (suffix.isEmpty()) continue;
+            int dot = suffix.indexOf('.');
+            String seg = dot > 0 ? suffix.substring(0, dot) : suffix;
+            String rest = dot > 0 ? suffix.substring(dot + 1) : "";
+            next.computeIfAbsent(seg, k -> new LinkedHashMap<>()).put(rest, e.getValue());
+        }
+
+        XContentParser.Token token;
+        while ((token = parser.nextToken()) != null && token != XContentParser.Token.END_OBJECT) {
+            if (token == XContentParser.Token.FIELD_NAME) {
+                String childField = parser.currentName();
+                Map<String, String> targets = next.get(childField);
+                parser.nextToken();
+                if (targets != null) {
+                    streamExtractValue(parser, targets, result);
+                } else {
+                    parser.skipChildren();
+                }
+            }
+        }
     }
 
     /**

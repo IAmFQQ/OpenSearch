@@ -68,6 +68,7 @@ import org.opensearch.index.mapper.MetadataFieldMapper;
 import org.opensearch.index.mapper.NestedPathFieldMapper;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.index.mapper.ObjectMapper;
+import org.opensearch.index.mapper.PatternTextFieldMapper;
 import org.opensearch.index.mapper.RangeType;
 import org.opensearch.index.mapper.RoutingFieldMapper;
 import org.opensearch.index.mapper.SemanticVersionFieldMapper;
@@ -169,6 +170,7 @@ public class IndicesModule extends AbstractModule {
         mappers.put(IpFieldMapper.CONTENT_TYPE, IpFieldMapper.PARSER);
         mappers.put(TextFieldMapper.CONTENT_TYPE, TextFieldMapper.PARSER);
         mappers.put(MatchOnlyTextFieldMapper.CONTENT_TYPE, MatchOnlyTextFieldMapper.PARSER);
+        mappers.put(PatternTextFieldMapper.CONTENT_TYPE, PatternTextFieldMapper.PARSER);
         mappers.put(KeywordFieldMapper.CONTENT_TYPE, KeywordFieldMapper.PARSER);
         mappers.put(ObjectMapper.CONTENT_TYPE, new ObjectMapper.TypeParser());
         mappers.put(ObjectMapper.NESTED_CONTENT_TYPE, new ObjectMapper.TypeParser());

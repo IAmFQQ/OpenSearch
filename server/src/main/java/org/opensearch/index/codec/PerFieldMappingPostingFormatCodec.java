@@ -85,18 +85,35 @@ public class PerFieldMappingPostingFormatCodec extends Lucene104Codec {
 
     @Override
     public PostingsFormat getPostingsFormatForField(String field) {
+        PostingsFormat resolved = resolvePostingsFormat(field, mapperService, logger);
+        if (resolved != null) {
+            return resolved;
+        }
+        if (docIdPostingsFormat == null) {
+            docIdPostingsFormat = new FuzzyFilterPostingsFormat(super.getPostingsFormatForField(field), fuzzySetFactory);
+        }
+        return docIdPostingsFormat;
+    }
+
+    /**
+     * Resolves a field-specific postings format. Returns {@code null} for
+     * {@link IdFieldMapper} when fuzzy sets are enabled, signalling the caller
+     * to create and cache a {@link FuzzyFilterPostingsFormat}.
+     */
+    static PostingsFormat resolvePostingsFormat(String field, MapperService mapperService, Logger logger) {
+        if (mapperService == null) {
+            return PostingsFormat.forName("Lucene104");
+        }
         final MappedFieldType fieldType = mapperService.fieldType(field);
         if (fieldType == null) {
             logger.warn("no index mapper found for field: [{}] returning default postings format", field);
         } else if (fieldType.unwrap() instanceof CompletionFieldMapper.CompletionFieldType) {
             return CompletionFieldMapper.CompletionFieldType.postingsFormat();
-        } else if (IdFieldMapper.NAME.equals(field) && mapperService.getIndexSettings().isEnableFuzzySetForDocId()) {
-            if (docIdPostingsFormat == null) {
-                docIdPostingsFormat = new FuzzyFilterPostingsFormat(super.getPostingsFormatForField(field), fuzzySetFactory);
-            }
-            return docIdPostingsFormat;
+        } else if (IdFieldMapper.NAME.equals(field)
+            && mapperService.getIndexSettings().isEnableFuzzySetForDocId()) {
+            return null;
         }
-        return super.getPostingsFormatForField(field);
+        return PostingsFormat.forName("Lucene104");
     }
 
     @Override

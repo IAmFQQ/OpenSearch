@@ -903,6 +903,26 @@ public final class IndexSettings {
         Property.IndexScope
     );
 
+    public static final Setting<IndexMode> INDEX_MODE = new Setting<>(
+        "index.mode",
+        IndexMode.STANDARD.name(),
+        IndexMode::fromString,
+        Property.IndexScope,
+        Property.Final
+    );
+
+    /**
+     * When enabled, document routing uses sort field values (e.g. {@code host.name})
+     * instead of {@code _id}. This colocates documents with the same sort key on the
+     * same shard, improving sort-time compression via RLE doc values.
+     */
+    public static final Setting<Boolean> LOGSDB_ROUTE_ON_SORT_FIELDS = Setting.boolSetting(
+        "index.logsdb.route_on_sort_fields",
+        false,
+        Property.IndexScope,
+        Property.Final
+    );
+
     public static final Setting<Boolean> INDEX_DERIVED_SOURCE_SETTING = Setting.boolSetting(
         "index.derived_source.enabled",
         false,
@@ -2355,6 +2375,18 @@ public final class IndexSettings {
 
     public boolean isDerivedSourceEnabledForTranslog() {
         return this.derivedSourceEnabledForTranslog;
+    }
+
+    public IndexMode getIndexMode() {
+        return INDEX_MODE.get(settings);
+    }
+
+    public boolean isLogsDb() {
+        return getIndexMode() == IndexMode.LOGSDB;
+    }
+
+    public boolean isRouteOnSortFieldsEnabled() {
+        return LOGSDB_ROUTE_ON_SORT_FIELDS.get(settings);
     }
 
     public boolean isDerivedSourceEnabled() {

@@ -94,7 +94,9 @@ public class ParsedDocument {
 
     public void updateSeqID(long sequenceNumber, long primaryTerm) {
         this.seqID.seqNo.setLongValue(sequenceNumber);
-        this.seqID.seqNoDocValue.setLongValue(sequenceNumber);
+        if (this.seqID.seqNoDocValue != null) {
+            this.seqID.seqNoDocValue.setLongValue(sequenceNumber);
+        }
         this.seqID.primaryTerm.setLongValue(primaryTerm);
     }
 

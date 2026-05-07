@@ -40,6 +40,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.PublicApi;
+import org.opensearch.common.settings.Setting;
 import org.opensearch.index.fielddata.IndexFieldData;
 import org.opensearch.index.fielddata.IndexNumericFieldData.NumericType;
 import org.opensearch.index.fielddata.plain.SortedNumericIndexFieldData;
@@ -87,7 +88,6 @@ public class SeqNoFieldMapper extends MetadataFieldMapper {
 
         public SequenceIDFields(Field seqNo, Field seqNoDocValue, Field primaryTerm, Field tombstoneField) {
             Objects.requireNonNull(seqNo, "sequence number field cannot be null");
-            Objects.requireNonNull(seqNoDocValue, "sequence number dv field cannot be null");
             Objects.requireNonNull(primaryTerm, "primary term field cannot be null");
             this.seqNo = seqNo;
             this.seqNoDocValue = seqNoDocValue;
@@ -103,6 +103,22 @@ public class SeqNoFieldMapper extends MetadataFieldMapper {
                 new NumericDocValuesField(TOMBSTONE_NAME, 0)
             );
         }
+
+        public static SequenceIDFields emptySeqID(boolean docValuesOnly) {
+            if (docValuesOnly) {
+                // NumericDocValuesField.indexedField() creates a single field that provides
+                // both indexed (skip index) and doc values, removing the need for a separate
+                // NumericDocValuesField for _seq_no. _tombstone and _primary_term are kept.
+                return new SequenceIDFields(
+                    NumericDocValuesField.indexedField(NAME, SequenceNumbers.UNASSIGNED_SEQ_NO),
+                    null,
+                    new NumericDocValuesField(PRIMARY_TERM_NAME, 0),
+                    new NumericDocValuesField(TOMBSTONE_NAME, 0)
+                );
+            }
+            return emptySeqID();
+        }
+
     }
 
     public static final String NAME = "_seq_no";
@@ -110,7 +126,22 @@ public class SeqNoFieldMapper extends MetadataFieldMapper {
     public static final String PRIMARY_TERM_NAME = "_primary_term";
     public static final String TOMBSTONE_NAME = "_tombstone";
 
-    public static final TypeParser PARSER = new FixedTypeParser(c -> new SeqNoFieldMapper());
+    /**
+     * When enabled, {@code _seq_no} uses a single {@link NumericDocValuesField#indexedField}
+     * that stores both indexed and doc values in one field, eliminating the separate
+     * {@link LongPoint} field. The {@code _tombstone} doc values field is also dropped.
+     */
+    public static final Setting<Boolean> SEQ_NO_DOC_VALUES_ONLY = Setting.boolSetting(
+        "index.seq_no_doc_values_only",
+        false,
+        Setting.Property.IndexScope,
+        Setting.Property.Final
+    );
+
+    public static final TypeParser PARSER = new FixedTypeParser(c -> {
+        boolean docValuesOnly = c.getSettings().getAsBoolean(SEQ_NO_DOC_VALUES_ONLY.getKey(), false);
+        return new SeqNoFieldMapper(docValuesOnly);
+    });
 
     /**
      * Field type for internal sequence numbers
@@ -199,19 +230,31 @@ public class SeqNoFieldMapper extends MetadataFieldMapper {
         }
     }
 
+    private final boolean docValuesOnly;
+
     public SeqNoFieldMapper() {
+        this(false);
+    }
+
+    private SeqNoFieldMapper(boolean docValuesOnly) {
         super(SeqNoFieldType.INSTANCE);
+        this.docValuesOnly = docValuesOnly;
     }
 
     @Override
     public void preParse(ParseContext context) throws IOException {
         // see InternalEngine.innerIndex to see where the real version value is set
         // also see ParsedDocument.updateSeqID (called by innerIndex)
-        SequenceIDFields seqID = SequenceIDFields.emptySeqID();
+        SequenceIDFields seqID = SequenceIDFields.emptySeqID(docValuesOnly);
         context.seqID(seqID);
         context.doc().add(seqID.seqNo);
-        context.doc().add(seqID.seqNoDocValue);
+        if (seqID.seqNoDocValue != null) {
+            context.doc().add(seqID.seqNoDocValue);
+        }
         context.doc().add(seqID.primaryTerm);
+        if (seqID.tombstoneField != null) {
+            context.doc().add(seqID.tombstoneField);
+        }
     }
 
     @Override
@@ -225,7 +268,9 @@ public class SeqNoFieldMapper extends MetadataFieldMapper {
         assert seqID != null;
         for (Document doc : context.nonRootDocuments()) {
             doc.add(seqID.seqNo);
-            doc.add(seqID.seqNoDocValue);
+            if (seqID.seqNoDocValue != null) {
+                doc.add(seqID.seqNoDocValue);
+            }
         }
     }
 

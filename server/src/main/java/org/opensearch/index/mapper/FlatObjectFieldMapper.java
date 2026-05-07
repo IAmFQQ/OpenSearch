@@ -547,6 +547,34 @@ public final class FlatObjectFieldMapper extends DynamicKeyFieldMapper {
     }
 
     @Override
+    protected DerivedFieldGenerator derivedFieldGenerator() {
+        // Read flat_object leaf values from the value field's SortedSetDocValues.
+        // Each stored value has the format "\0<rootName>\0<value>"; strip the
+        // prefix (everything up to and including the second \0) to recover the original value.
+        return new DerivedFieldGenerator(
+            mappedFieldType,
+            new SortedSetDocValuesFetcher(fieldType().getValueFieldType(), simpleName()) {
+                @Override
+                public Object convert(Object value) {
+                    if (value == null) return null;
+                    String s = ((BytesRef) value).utf8ToString();
+                    int secondNull = s.indexOf('\0', 1);
+                    if (secondNull > 0 && secondNull < s.length() - 1) {
+                        s = s.substring(secondNull + 1);
+                    }
+                    return s;
+                }
+            },
+            null
+        ) {
+            @Override
+            public FieldValueType getDerivedFieldPreference() {
+                return FieldValueType.DOC_VALUES;
+            }
+        };
+    }
+
+    @Override
     protected FlatObjectFieldMapper clone() {
         return (FlatObjectFieldMapper) super.clone();
     }

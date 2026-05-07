@@ -99,11 +99,8 @@ public class CodecService {
             } else {
                 codecs.put(DEFAULT_CODEC, new PerFieldMappingPostingFormatCodec(Lucene104Codec.Mode.BEST_SPEED, mapperService, logger));
                 codecs.put(LZ4, new PerFieldMappingPostingFormatCodec(Lucene104Codec.Mode.BEST_SPEED, mapperService, logger));
-                codecs.put(
-                    BEST_COMPRESSION_CODEC,
-                    new PerFieldMappingPostingFormatCodec(Lucene104Codec.Mode.BEST_COMPRESSION, mapperService, logger)
-                );
-                codecs.put(ZLIB, new PerFieldMappingPostingFormatCodec(Lucene104Codec.Mode.BEST_COMPRESSION, mapperService, logger));
+                codecs.put(BEST_COMPRESSION_CODEC, new ZstdCompressingCodec(mapperService, logger));
+                codecs.put(ZLIB, new ZstdCompressingCodec(mapperService, logger));
             }
         }
         codecs.put(LUCENE_DEFAULT_CODEC, Codec.getDefault());

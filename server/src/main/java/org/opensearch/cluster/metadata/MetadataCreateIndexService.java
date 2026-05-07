@@ -91,6 +91,11 @@ import org.opensearch.index.compositeindex.CompositeIndexSettings;
 import org.opensearch.index.compositeindex.CompositeIndexValidator;
 import org.opensearch.index.compositeindex.datacube.startree.StarTreeIndexSettings;
 import org.opensearch.index.mapper.DocumentMapper;
+import org.opensearch.index.mapper.SeqNoFieldMapper;
+import org.opensearch.index.IndexMode;
+import org.opensearch.index.IndexSortConfig;
+import org.opensearch.index.codec.CodecService;
+import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.mapper.MapperService.MergeReason;
 import org.opensearch.index.query.QueryShardContext;
@@ -1194,6 +1199,9 @@ public class MetadataCreateIndexService {
         // now, put the request settings, so they override templates
         indexSettingsBuilder.put(requestSettings.build());
 
+        // apply logsdb defaults if index.mode=logsdb
+        applyIndexModeDefaults(indexSettingsBuilder);
+
         if (indexSettingsBuilder.get(IndexMetadata.SETTING_INDEX_VERSION_CREATED.getKey()) == null) {
             final DiscoveryNodes nodes = currentState.nodes();
             final Version createdVersion = Version.min(Version.CURRENT, nodes.getSmallestNonClientNodeVersion());
@@ -1257,6 +1265,40 @@ public class MetadataCreateIndexService {
         validateSearchOnlyReplicasSettings(indexSettings);
         validateIndexTotalPrimaryShardsPerNodeSetting(indexSettings);
         return indexSettings;
+    }
+
+    /**
+     * Inject default settings for {@code index.mode=logsdb}.
+     * Automatically enables derived_source, best_compression (ZSTD), and host-first index sorting
+     * unless the user has explicitly configured them.
+     */
+    private static void applyIndexModeDefaults(Settings.Builder indexSettingsBuilder) {
+        String modeStr = indexSettingsBuilder.get(IndexSettings.INDEX_MODE.getKey());
+        if (IndexMode.LOGSDB.name().equalsIgnoreCase(modeStr) == false) {
+            return;
+        }
+        // derived_source: biggest single win, skip _source stored field write
+        if (indexSettingsBuilder.keys().contains(IndexSettings.INDEX_DERIVED_SOURCE_SETTING.getKey()) == false) {
+            indexSettingsBuilder.put(IndexSettings.INDEX_DERIVED_SOURCE_SETTING.getKey(), "true");
+        }
+        // best_compression: uses ZSTD stored fields via ZstdCompressingCodec
+        if (indexSettingsBuilder.keys().contains(EngineConfig.INDEX_CODEC_SETTING.getKey()) == false) {
+            indexSettingsBuilder.put(EngineConfig.INDEX_CODEC_SETTING.getKey(), CodecService.BEST_COMPRESSION_CODEC);
+        }
+        // timestamp index sort: improves RLE compression for doc values
+        // Using @timestamp only as default to avoid failures for data streams without host.name
+        if (indexSettingsBuilder.keys().contains(IndexSortConfig.INDEX_SORT_FIELD_SETTING.getKey()) == false) {
+            indexSettingsBuilder.putList(IndexSortConfig.INDEX_SORT_FIELD_SETTING.getKey(), "@timestamp");
+            indexSettingsBuilder.putList(IndexSortConfig.INDEX_SORT_ORDER_SETTING.getKey(), "desc");
+        }
+        // seq_no doc_values_only: merge indexed + doc values into single field
+        if (indexSettingsBuilder.keys().contains(SeqNoFieldMapper.SEQ_NO_DOC_VALUES_ONLY.getKey()) == false) {
+            indexSettingsBuilder.put(SeqNoFieldMapper.SEQ_NO_DOC_VALUES_ONLY.getKey(), "true");
+        }
+        // route_on_sort_fields: colocate docs by sort key for better RLE compression
+        if (indexSettingsBuilder.keys().contains(IndexSettings.LOGSDB_ROUTE_ON_SORT_FIELDS.getKey()) == false) {
+            indexSettingsBuilder.put(IndexSettings.LOGSDB_ROUTE_ON_SORT_FIELDS.getKey(), "true");
+        }
     }
 
     private static void validateSearchOnlyReplicasSettings(Settings indexSettings) {

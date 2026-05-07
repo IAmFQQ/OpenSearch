@@ -155,6 +155,7 @@ import org.opensearch.http.HttpServerTransport;
 import org.opensearch.identity.IdentityService;
 import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.index.LogsIndexModeSettingsProvider;
 import org.opensearch.index.IndexingPressureService;
 import org.opensearch.index.IngestionConsumerFactory;
 import org.opensearch.index.SegmentReplicationStatsTracker;
@@ -1070,6 +1071,7 @@ public class Node implements Closeable {
                 remoteStoreSettings,
                 repositoriesServiceReference::get
             );
+            metadataCreateIndexService.addAdditionalIndexSettingProvider(new LogsIndexModeSettingsProvider(settings));
             pluginsService.filterPlugins(Plugin.class)
                 .forEach(
                     p -> p.getAdditionalIndexSettingProviders().forEach(metadataCreateIndexService::addAdditionalIndexSettingProvider)
