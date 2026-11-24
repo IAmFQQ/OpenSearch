@@ -8,6 +8,9 @@
 
 package org.opensearch.cluster.routing.allocation;
 
+import org.opensearch.cluster.routing.allocation.allocator.BalancedShardsAllocator;
+import org.opensearch.cluster.routing.allocation.allocator.ShardsBalancer;
+
 import java.util.function.Predicate;
 
 /**
@@ -53,11 +56,13 @@ public class ConstraintTypes {
      * average shards per index per node.
      */
     public static Predicate<Constraint.ConstraintParams> isIndexShardsPerNodeBreached() {
-        return (params) -> {
-            int currIndexShardsOnNode = params.getNode().numShards(params.getIndex());
-            int allowedIndexShardsPerNode = (int) Math.ceil(params.getBalancer().avgShardsPerNode(params.getIndex()));
-            return (currIndexShardsOnNode >= allowedIndexShardsPerNode);
-        };
+        return params -> isIndexShardsPerNodeBreached(params.getBalancer(), params.getNode(), params.getIndex());
+    }
+
+    static boolean isIndexShardsPerNodeBreached(ShardsBalancer balancer, BalancedShardsAllocator.ModelNode node, String index) {
+        int currIndexShardsOnNode = node.numShards(index);
+        int allowedIndexShardsPerNode = (int) Math.ceil(balancer.avgShardsPerNode(index));
+        return currIndexShardsOnNode >= allowedIndexShardsPerNode;
     }
 
     /**
@@ -67,11 +72,13 @@ public class ConstraintTypes {
      * as allocation or rebalancing target
      */
     public static Predicate<Constraint.ConstraintParams> isPerIndexPrimaryShardsPerNodeBreached() {
-        return (params) -> {
-            int perIndexPrimaryShardCount = params.getNode().numPrimaryShards(params.getIndex());
-            int perIndexAllowedPrimaryShardCount = (int) Math.ceil(params.getBalancer().avgPrimaryShardsPerNode(params.getIndex()));
-            return perIndexPrimaryShardCount >= perIndexAllowedPrimaryShardCount;
-        };
+        return params -> isPerIndexPrimaryShardsPerNodeBreached(params.getBalancer(), params.getNode(), params.getIndex());
+    }
+
+    static boolean isPerIndexPrimaryShardsPerNodeBreached(ShardsBalancer balancer, BalancedShardsAllocator.ModelNode node, String index) {
+        int perIndexPrimaryShardCount = node.numPrimaryShards(index);
+        int perIndexAllowedPrimaryShardCount = (int) Math.ceil(balancer.avgPrimaryShardsPerNode(index));
+        return perIndexPrimaryShardCount >= perIndexAllowedPrimaryShardCount;
     }
 
     /**
@@ -80,11 +87,13 @@ public class ConstraintTypes {
      * is assigned to node resulting in lesser chances of node being selected as allocation/rebalance target
      */
     public static Predicate<Constraint.ConstraintParams> isPrimaryShardsPerNodeBreached(float buffer) {
-        return (params) -> {
-            int primaryShardCount = params.getNode().numPrimaryShards();
-            int allowedPrimaryShardCount = (int) Math.ceil(params.getBalancer().avgPrimaryShardsPerNode() * (1 + buffer));
-            return primaryShardCount >= allowedPrimaryShardCount;
-        };
+        return params -> isPrimaryShardsPerNodeBreached(params.getBalancer(), params.getNode(), buffer);
+    }
+
+    static boolean isPrimaryShardsPerNodeBreached(ShardsBalancer balancer, BalancedShardsAllocator.ModelNode node, float buffer) {
+        int primaryShardCount = node.numPrimaryShards();
+        int allowedPrimaryShardCount = (int) Math.ceil(balancer.avgPrimaryShardsPerNode() * (1 + buffer));
+        return primaryShardCount >= allowedPrimaryShardCount;
     }
 
     public static long predicateKeyToWeightMap(String key, long primaryConstraintWeight) {

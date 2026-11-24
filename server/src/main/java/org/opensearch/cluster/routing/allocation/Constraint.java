@@ -25,10 +25,20 @@ import static org.opensearch.cluster.routing.allocation.ConstraintTypes.predicat
 public class Constraint implements Predicate<Constraint.ConstraintParams> {
 
     private boolean enable;
-    private Predicate<ConstraintParams> predicate;
+    private final Predicate<ConstraintParams> predicate;
+    private final NodePredicate nodePredicate;
 
     public Constraint(Predicate<ConstraintParams> constraintPredicate) {
+        this(constraintPredicate, null);
+    }
+
+    private Constraint(Predicate<ConstraintParams> constraintPredicate, NodePredicate nodePredicate) {
         this.predicate = constraintPredicate;
+        this.nodePredicate = nodePredicate;
+    }
+
+    static Constraint fromNodePredicate(NodePredicate predicate) {
+        return new Constraint(params -> predicate.test(params.getBalancer(), params.getNode(), params.getIndex()), predicate);
     }
 
     @Override
@@ -36,8 +46,20 @@ public class Constraint implements Predicate<Constraint.ConstraintParams> {
         return this.enable && predicate.test(constraintParams);
     }
 
+    boolean test(ShardsBalancer balancer, BalancedShardsAllocator.ModelNode node, String index, long primaryConstraintThreshold) {
+        if (nodePredicate == null) {
+            return test(new ConstraintParams(balancer, node, index, primaryConstraintThreshold));
+        }
+        return enable && nodePredicate.test(balancer, node, index);
+    }
+
     public void setEnable(boolean enable) {
         this.enable = enable;
+    }
+
+    @FunctionalInterface
+    interface NodePredicate {
+        boolean test(ShardsBalancer balancer, BalancedShardsAllocator.ModelNode node, String index);
     }
 
     static class ConstraintParams {
