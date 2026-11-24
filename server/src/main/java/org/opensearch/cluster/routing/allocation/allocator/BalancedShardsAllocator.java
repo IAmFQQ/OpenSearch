@@ -677,6 +677,23 @@ public class BalancedShardsAllocator implements ShardsAllocator {
             return balancerWeight + rebalanceConstraints.weight(balancer, node, index, primaryConstraintThreshold);
         }
 
+        private float weightWithRebalanceConstraints(
+            ShardsBalancer balancer,
+            ModelNode node,
+            String index,
+            float avgShardsPerNode,
+            float avgIndexShardsPerNode
+        ) {
+            final float weightShard = node.numShards() - avgShardsPerNode;
+            final float weightIndex = node.numShards(index) - avgIndexShardsPerNode;
+            return theta0 * weightShard + theta1 * weightIndex + rebalanceConstraints.weight(
+                balancer,
+                node,
+                index,
+                primaryConstraintThreshold
+            );
+        }
+
         float weight(ShardsBalancer balancer, ModelNode node, String index) {
             final float weightShard = node.numShards() - balancer.avgShardsPerNode();
             final float weightIndex = node.numShards(index) - balancer.avgShardsPerNode(index);
@@ -915,8 +932,22 @@ public class BalancedShardsAllocator implements ShardsAllocator {
          */
         public void reset(String index, int from, int to) {
             this.index = index;
-            for (int i = from; i < to; i++) {
-                weights[i] = weight(modelNodes[i]);
+            if (from < to && balancer.getClass() == LocalShardsBalancer.class && function.getClass() == WeightFunction.class) {
+                final float avgShardsPerNode = balancer.avgShardsPerNode();
+                final float avgIndexShardsPerNode = balancer.avgShardsPerNode(index);
+                for (int i = from; i < to; i++) {
+                    weights[i] = function.weightWithRebalanceConstraints(
+                        balancer,
+                        modelNodes[i],
+                        index,
+                        avgShardsPerNode,
+                        avgIndexShardsPerNode
+                    );
+                }
+            } else {
+                for (int i = from; i < to; i++) {
+                    weights[i] = weight(modelNodes[i]);
+                }
             }
             sort(from, to);
         }
