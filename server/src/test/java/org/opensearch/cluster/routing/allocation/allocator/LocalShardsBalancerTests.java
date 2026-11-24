@@ -22,8 +22,12 @@ import org.opensearch.cluster.routing.RoutingNodes;
 import org.opensearch.cluster.routing.RoutingTable;
 import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.routing.ShardRoutingState;
+import org.opensearch.cluster.routing.TestShardRouting;
 import org.opensearch.cluster.routing.allocation.AllocationService;
 import org.opensearch.cluster.routing.allocation.RoutingAllocation;
+import org.opensearch.cluster.routing.allocation.allocator.BalancedShardsAllocator.ModelNode;
+import org.opensearch.cluster.routing.allocation.allocator.BalancedShardsAllocator.NodeSorter;
+import org.opensearch.cluster.routing.allocation.allocator.BalancedShardsAllocator.WeightFunction;
 import org.opensearch.cluster.routing.allocation.decider.AllocationDecider;
 import org.opensearch.cluster.routing.allocation.decider.AllocationDeciders;
 import org.opensearch.cluster.routing.allocation.decider.Decision;
@@ -40,7 +44,12 @@ import java.util.Set;
 import java.util.function.Function;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 public class LocalShardsBalancerTests extends OpenSearchAllocationTestCase {
@@ -375,6 +384,222 @@ public class LocalShardsBalancerTests extends OpenSearchAllocationTestCase {
         public Decision canAllocateAnyShardToNode(RoutingNode node, RoutingAllocation allocation) {
             return excluded.contains(node.nodeId()) ? Decision.NO : Decision.ALWAYS;
         }
+    }
+
+    public void testNodeSorterPreparesIndexAverageOncePerReset() {
+        Metadata metadata = nodeSorterMetadata();
+        WeightFunction function = new WeightFunction(0.55f, 0.45f, 0.1f, 37, false, false);
+        LocalShardsBalancer balancer = nodeSorterBalancer(metadata, function);
+        NodeSorter sorter = new NodeSorter(nodeSorterModels(), function, balancer);
+        clearInvocations(metadata);
+
+        sorter.reset("test_0");
+        verify(metadata, times(1)).index("test_0");
+
+        sorter.reset("test_0", 1, 3);
+        verify(metadata, times(2)).index("test_0");
+
+        sorter.reset("test_1");
+        verify(metadata, times(1)).index("test_1");
+    }
+
+    public void testNodeSorterPreservesWeightsAndPartialSort() {
+        assertNodeSorterPreservesWeights(false);
+    }
+
+    public void testNodeSorterPreservesPrimaryConstraints() {
+        assertNodeSorterPreservesWeights(true);
+    }
+
+    private void assertNodeSorterPreservesWeights(boolean primaryConstraints) {
+        Metadata metadata = nodeSorterMetadata();
+        WeightFunction function = new WeightFunction(0.55f, 0.45f, 0.1f, 37, primaryConstraints, primaryConstraints);
+        WeightFunction referenceFunction = new WeightFunction(0.55f, 0.45f, 0.1f, 37, primaryConstraints, primaryConstraints) {
+        };
+        LocalShardsBalancer balancer = nodeSorterBalancer(metadata, function);
+        ModelNode[] models = nodeSorterModels();
+        NodeSorter sorter = new NodeSorter(models.clone(), function, balancer);
+        NodeSorter reference = new NodeSorter(models.clone(), referenceFunction, balancer);
+        assertEquals(1.5f, balancer.avgShardsPerNode("test_0"), 0.0f);
+
+        for (String index : List.of("test_0", "test_1")) {
+            ModelNode untouchedNode = sorter.modelNodes[0];
+            float untouchedWeight = sorter.weights[0];
+            sorter.reset(index, 1, 3);
+            reference.reset(index, 1, 3);
+            assertSame(untouchedNode, sorter.modelNodes[0]);
+            assertEquals(untouchedWeight, sorter.weights[0], 0.0f);
+            assertArrayEquals(reference.modelNodes, sorter.modelNodes);
+            assertArrayEquals(reference.weights, sorter.weights, 0.0f);
+
+            sorter.reset(index);
+            reference.reset(index);
+            assertArrayEquals(reference.modelNodes, sorter.modelNodes);
+            assertArrayEquals(reference.weights, sorter.weights, 0.0f);
+        }
+    }
+
+    public void testNodeSorterKeepsRelocationWeightsAndPrimaryThresholdLive() {
+        WeightFunction function = new WeightFunction(0.55f, 0.45f, 0.1f, 37, false, true);
+        LocalShardsBalancer balancer = nodeSorterBalancer(nodeSorterMetadata(), function);
+        ModelNode[] models = nodeSorterModels();
+        NodeSorter sorter = new NodeSorter(models.clone(), function, balancer);
+        sorter.reset("test_0");
+        ModelNode source = models[0];
+        ModelNode target = models[2];
+        float sourceWeight = sorter.weight(source);
+        float targetWeight = sorter.weight(target);
+        ShardRouting shard = source.getIndex("test_0").iterator().next();
+
+        source.removeShard(shard);
+        target.addShard(shard);
+        assertEquals(sourceWeight - 1.0f - 37.0f, sorter.weight(source), 0.0001f);
+        assertEquals(targetWeight + 1.0f + 37.0f, sorter.weight(target), 0.0001f);
+        int sourcePosition = Arrays.asList(sorter.modelNodes).indexOf(source);
+        int targetPosition = Arrays.asList(sorter.modelNodes).indexOf(target);
+        sorter.weights[sourcePosition] = sorter.weight(source);
+        sorter.weights[targetPosition] = sorter.weight(target);
+        sorter.sort(0, 3);
+        for (int i = 0; i < sorter.modelNodes.length; i++) {
+            assertEquals(function.weightWithRebalanceConstraints(balancer, sorter.modelNodes[i], "test_0"), sorter.weights[i], 0.0f);
+            if (i > 0) {
+                assertTrue(sorter.weights[i - 1] <= sorter.weights[i]);
+            }
+        }
+
+        function.updatePrimaryConstraintThreshold(73);
+        assertEquals(targetWeight + 1.0f + 73.0f, sorter.weight(target), 0.0001f);
+        sorter.reset("test_0");
+        for (int i = 0; i < sorter.modelNodes.length; i++) {
+            assertEquals(function.weightWithRebalanceConstraints(balancer, sorter.modelNodes[i], "test_0"), sorter.weights[i], 0.0f);
+        }
+    }
+
+    public void testNodeSorterRefreshesAveragesAfterAllocation() {
+        WeightFunction function = new WeightFunction(0.55f, 0.45f, 0.1f, 37, false, false);
+        LocalShardsBalancer balancer = nodeSorterBalancer(nodeSorterMetadata(), function);
+        ModelNode[] models = nodeSorterModels();
+        NodeSorter sorter = new NodeSorter(models, function, balancer);
+        sorter.reset("test_0");
+        ModelNode node = models[0];
+        float previousWeight = sorter.weight(node);
+        assertEquals(0.0f, balancer.avgShardsPerNode(), 0.0f);
+
+        balancer.allocateUnassigned();
+
+        assertEquals(3.5f, balancer.avgShardsPerNode(), 0.0f);
+        assertEquals(previousWeight - 0.45f * 3.5f, sorter.weight(node), 0.0001f);
+        sorter.reset("test_0");
+        for (int i = 0; i < models.length; i++) {
+            assertEquals(function.weightWithRebalanceConstraints(balancer, models[i], "test_0"), sorter.weights[i], 0.0f);
+        }
+    }
+
+    public void testNodeSorterEmptyRangeDoesNotReadMetadata() {
+        Metadata metadata = nodeSorterMetadata();
+        WeightFunction function = new WeightFunction(0.55f, 0.45f, 0.1f, 37, false, false);
+        LocalShardsBalancer balancer = nodeSorterBalancer(metadata, function);
+        NodeSorter sorter = new NodeSorter(nodeSorterModels(), function, balancer);
+        clearInvocations(metadata);
+
+        sorter.reset("missing", 1, 1);
+        new NodeSorter(new ModelNode[0], function, balancer).reset("missing");
+
+        verifyNoInteractions(metadata);
+    }
+
+    public void testNodeSorterPreservesDerivedBalancerDispatch() {
+        WeightFunction function = new WeightFunction(0.55f, 0.45f, 0.1f, 37, false, false);
+        LocalShardsBalancer derivedBalancer = spy(nodeSorterBalancer(nodeSorterMetadata(), function));
+        when(derivedBalancer.avgShardsPerNode()).thenReturn(0.25f, 0.5f, 0.75f);
+        when(derivedBalancer.avgShardsPerNode("test_0")).thenReturn(1.25f, 1.5f, 1.75f);
+        ModelNode[] models = nodeSorterModels();
+        NodeSorter sorter = new NodeSorter(models.clone(), function, derivedBalancer);
+        clearInvocations(derivedBalancer);
+
+        sorter.reset("test_0");
+
+        verify(derivedBalancer, times(3)).avgShardsPerNode();
+        verify(derivedBalancer, times(3)).avgShardsPerNode("test_0");
+        for (int i = 0; i < models.length; i++) {
+            float average = 0.25f * (i + 1);
+            float expected = 0.45f * (models[i].numShards() - average) + 0.55f * (models[i].numShards("test_0") - 1.0f - average);
+            int position = Arrays.asList(sorter.modelNodes).indexOf(models[i]);
+            assertEquals(expected, sorter.weights[position], 0.0001f);
+        }
+    }
+
+    public void testNodeSorterPreservesCustomWeightDispatch() {
+        WeightFunction function = new WeightFunction(0.55f, 0.45f, 0.1f, 37, false, false) {
+            @Override
+            float weight(ShardsBalancer balancer, ModelNode node, String index) {
+                return -node.numShards(index);
+            }
+        };
+        assertCustomNodeSorterDispatch(function);
+    }
+
+    public void testNodeSorterPreservesCustomRebalanceWeightDispatch() {
+        WeightFunction function = new WeightFunction(0.55f, 0.45f, 0.1f, 37, false, false) {
+            @Override
+            public float weightWithRebalanceConstraints(ShardsBalancer balancer, ModelNode node, String index) {
+                return -node.numShards(index);
+            }
+        };
+        assertCustomNodeSorterDispatch(function);
+    }
+
+    private void assertCustomNodeSorterDispatch(WeightFunction function) {
+        Metadata metadata = nodeSorterMetadata();
+        LocalShardsBalancer balancer = nodeSorterBalancer(metadata, function);
+        NodeSorter sorter = new NodeSorter(nodeSorterModels(), function, balancer);
+        clearInvocations(metadata);
+
+        sorter.reset("test_0");
+
+        verifyNoInteractions(metadata);
+        for (int i = 0; i < sorter.modelNodes.length; i++) {
+            assertEquals(-sorter.modelNodes[i].numShards("test_0"), sorter.weights[i], 0.0f);
+        }
+        assertSame(node1, sorter.modelNodes[0].getRoutingNode().node());
+    }
+
+    private Metadata nodeSorterMetadata() {
+        return spy(
+            Metadata.builder()
+                .put(IndexMetadata.builder("test_0").settings(settings(Version.CURRENT)).numberOfShards(3).numberOfReplicas(0))
+                .put(IndexMetadata.builder("test_1").settings(settings(Version.CURRENT)).numberOfShards(2).numberOfReplicas(1))
+                .build()
+        );
+    }
+
+    private LocalShardsBalancer nodeSorterBalancer(Metadata metadata, WeightFunction function) {
+        ClusterState state = ClusterState.builder(ClusterName.DEFAULT)
+            .metadata(metadata)
+            .routingTable(buildRoutingTable(metadata))
+            .nodes(DiscoveryNodes.builder().add(node1).add(node2).add(node3))
+            .build();
+        RoutingAllocation allocation = new RoutingAllocation(
+            new AllocationDeciders(List.of(new StaticClusterFilterDecider(Set.of("node3")))),
+            new RoutingNodes(state, false),
+            state,
+            ClusterInfo.EMPTY,
+            null,
+            System.nanoTime()
+        );
+        return new LocalShardsBalancer(logger, allocation, null, function, 0, false, false, true, false, null);
+    }
+
+    private ModelNode[] nodeSorterModels() {
+        ModelNode first = new ModelNode(new RoutingNode(node1.getId(), node1));
+        ModelNode second = new ModelNode(new RoutingNode(node2.getId(), node2));
+        ModelNode third = new ModelNode(new RoutingNode(node3.getId(), node3));
+        first.addShard(TestShardRouting.newShardRouting("test_0", 0, node1.getId(), true, ShardRoutingState.STARTED));
+        first.addShard(TestShardRouting.newShardRouting("test_0", 1, node1.getId(), true, ShardRoutingState.STARTED));
+        first.addShard(TestShardRouting.newShardRouting("test_0", 2, node1.getId(), true, ShardRoutingState.STARTED));
+        third.addShard(TestShardRouting.newShardRouting("test_1", 0, node3.getId(), true, ShardRoutingState.STARTED));
+        third.addShard(TestShardRouting.newShardRouting("test_1", 1, node3.getId(), true, ShardRoutingState.STARTED));
+        return new ModelNode[] { first, second, third };
     }
 
 }
