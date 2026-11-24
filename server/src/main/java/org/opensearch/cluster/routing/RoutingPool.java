@@ -62,7 +62,7 @@ public enum RoutingPool {
      */
     public static RoutingPool getIndexPool(IndexMetadata indexMetadata) {
         return indexMetadata.isRemoteSnapshot()
-            || (FeatureFlags.isEnabled(FeatureFlags.WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG) && isWarmIndex(indexMetadata))
+            || (isWarmIndex(indexMetadata) && FeatureFlags.isEnabled(FeatureFlags.WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG))
                 ? REMOTE_CAPABLE
                 : LOCAL_ONLY;
 

@@ -17,12 +17,16 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
+import org.opensearch.cluster.routing.IndexRoutingTable;
+import org.opensearch.cluster.routing.IndexShardRoutingTable;
 import org.opensearch.cluster.routing.RoutingNode;
 import org.opensearch.cluster.routing.RoutingNodes;
 import org.opensearch.cluster.routing.RoutingTable;
 import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.routing.ShardRoutingState;
+import org.opensearch.cluster.routing.TestShardRouting;
 import org.opensearch.cluster.routing.allocation.AllocationService;
+import org.opensearch.cluster.routing.allocation.MoveDecision;
 import org.opensearch.cluster.routing.allocation.RoutingAllocation;
 import org.opensearch.cluster.routing.allocation.decider.AllocationDecider;
 import org.opensearch.cluster.routing.allocation.decider.AllocationDeciders;
@@ -30,6 +34,9 @@ import org.opensearch.cluster.routing.allocation.decider.Decision;
 import org.opensearch.cluster.routing.allocation.decider.SameShardAllocationDecider;
 import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.util.FeatureFlags;
+import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.index.IndexModule;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -39,6 +46,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 
+import static org.opensearch.common.util.FeatureFlags.WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -51,6 +59,81 @@ public class LocalShardsBalancerTests extends OpenSearchAllocationTestCase {
     private final DiscoveryNode node4 = newNode("node4", "node4", Collections.singletonMap("zone", "1a"));
     private final DiscoveryNode node5 = newNode("node5", "node5", Collections.singletonMap("zone", "1b"));
     private final DiscoveryNode node6 = newNode("node6", "node6", Collections.singletonMap("zone", "1c"));
+
+    public void testAssignedModelAndMoveDecisionWithWarmIndexFlagChanges() throws Exception {
+        Metadata.Builder metadata = Metadata.builder();
+        RoutingTable.Builder routingTable = RoutingTable.builder();
+        for (Boolean warm : new Boolean[] { null, false, true }) {
+            for (boolean remoteSnapshot : new boolean[] { false, true }) {
+                Settings.Builder settings = settings(Version.CURRENT);
+                if (warm != null) {
+                    settings.put(IndexModule.IS_WARM_INDEX_SETTING.getKey(), warm);
+                }
+                if (remoteSnapshot) {
+                    settings.put(IndexModule.INDEX_STORE_TYPE_SETTING.getKey(), IndexModule.Type.REMOTE_SNAPSHOT.getSettingsKey());
+                }
+                IndexMetadata index = IndexMetadata.builder("index-" + warm + "-" + remoteSnapshot)
+                    .settings(settings)
+                    .numberOfShards(1)
+                    .numberOfReplicas(0)
+                    .build();
+                ShardRouting shard = TestShardRouting.newShardRouting(
+                    new ShardId(index.getIndex(), 0),
+                    node1.getId(),
+                    true,
+                    ShardRoutingState.STARTED
+                );
+                IndexShardRoutingTable shardTable = new IndexShardRoutingTable.Builder(shard.shardId()).addShard(shard).build();
+                metadata.put(IndexMetadata.builder(index).putInSyncAllocationIds(0, shardTable.getAllAllocationIds()));
+                routingTable.add(IndexRoutingTable.builder(index.getIndex()).addIndexShard(shardTable));
+            }
+        }
+        ClusterState state = ClusterState.builder(ClusterName.DEFAULT)
+            .metadata(metadata)
+            .routingTable(routingTable.build())
+            .nodes(DiscoveryNodes.builder().add(node1))
+            .build();
+
+        for (boolean enabled : new boolean[] { false, true, false }) {
+            FeatureFlags.TestUtils.with(WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG, enabled, () -> {
+                RoutingAllocation allocation = new RoutingAllocation(
+                    new AllocationDeciders(Collections.emptyList()),
+                    new RoutingNodes(state, false),
+                    state,
+                    ClusterInfo.EMPTY,
+                    null,
+                    System.nanoTime()
+                );
+                LocalShardsBalancer balancer = new LocalShardsBalancer(
+                    logger,
+                    allocation,
+                    null,
+                    mock(BalancedShardsAllocator.WeightFunction.class),
+                    0,
+                    false,
+                    false,
+                    false,
+                    false,
+                    null
+                );
+                int expectedCount = 0;
+                for (ShardRouting shard : allocation.routingNodes().node(node1.getId())) {
+                    IndexMetadata index = state.metadata().getIndexSafe(shard.index());
+                    boolean included = index.isRemoteSnapshot() == false
+                        || (index.getSettings().getAsBoolean(IndexModule.IS_WARM_INDEX_SETTING.getKey(), false) && enabled);
+                    MoveDecision decision = balancer.decideMove(shard);
+                    assertEquals(shard.getIndexName() + ", flag=" + enabled, included, decision.isDecisionTaken());
+                    if (included) {
+                        assertTrue(decision.canRemain());
+                        expectedCount++;
+                    } else {
+                        assertSame(MoveDecision.NOT_TAKEN, decision);
+                    }
+                }
+                assertEquals(expectedCount, balancer.avgShardsPerNode(), 0.0f);
+            });
+        }
+    }
 
     public void testAllocateUnassignedWhenAllShardsCanBeAllocated() {
         int numberOfIndices = 2;

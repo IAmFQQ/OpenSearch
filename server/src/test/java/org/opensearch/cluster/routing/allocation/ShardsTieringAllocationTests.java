@@ -15,6 +15,8 @@ import org.opensearch.cluster.routing.RoutingNode;
 import org.opensearch.cluster.routing.RoutingNodes;
 import org.opensearch.cluster.routing.RoutingPool;
 import org.opensearch.cluster.routing.ShardRouting;
+import org.opensearch.common.settings.Settings;
+import org.opensearch.common.util.FeatureFlags;
 import org.opensearch.index.IndexModule;
 
 import static org.opensearch.cluster.routing.RoutingPool.LOCAL_ONLY;
@@ -24,6 +26,35 @@ import static org.opensearch.common.util.FeatureFlags.WRITABLE_WARM_INDEX_EXPERI
 import static org.opensearch.index.IndexModule.IS_WARM_INDEX_SETTING;
 
 public class ShardsTieringAllocationTests extends TieringAllocationBaseTestCase {
+
+    public void testIndexPoolWithWarmIndexFlagChanges() throws Exception {
+        for (Boolean warm : new Boolean[] { null, false, true }) {
+            for (boolean remoteSnapshot : new boolean[] { false, true }) {
+                Settings.Builder settings = settings(Version.CURRENT);
+                if (warm != null) {
+                    settings.put(IS_WARM_INDEX_SETTING.getKey(), warm);
+                }
+                if (remoteSnapshot) {
+                    settings.put(IndexModule.INDEX_STORE_TYPE_SETTING.getKey(), IndexModule.Type.REMOTE_SNAPSHOT.getSettingsKey());
+                }
+                IndexMetadata indexMetadata = IndexMetadata.builder("test-index")
+                    .settings(settings)
+                    .numberOfShards(1)
+                    .numberOfReplicas(0)
+                    .build();
+                for (boolean enabled : new boolean[] { false, true, false }) {
+                    FeatureFlags.TestUtils.with(WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG, enabled, () -> {
+                        RoutingPool expected = remoteSnapshot || (Boolean.TRUE.equals(warm) && enabled) ? REMOTE_CAPABLE : LOCAL_ONLY;
+                        assertEquals(
+                            "warm=" + warm + ", remoteSnapshot=" + remoteSnapshot + ", flag=" + enabled,
+                            expected,
+                            getIndexPool(indexMetadata)
+                        );
+                    });
+                }
+            }
+        }
+    }
 
     @LockFeatureFlag(WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG)
     public void testShardsInLocalPool() {
