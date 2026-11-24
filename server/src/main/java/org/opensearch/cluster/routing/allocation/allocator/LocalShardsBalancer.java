@@ -597,7 +597,7 @@ public class LocalShardsBalancer extends ShardsBalancer {
      */
     private boolean canShardBeSkipped(ShardRouting shardRouting) {
         return (RoutingPool.REMOTE_CAPABLE.equals(RoutingPool.getShardPool(shardRouting, allocation))
-            && !(FeatureFlags.isEnabled(FeatureFlags.WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG) && isPartialShard(shardRouting, allocation)));
+            && !(isPartialShard(shardRouting, allocation) && FeatureFlags.isEnabled(FeatureFlags.WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG)));
     }
 
     /**
@@ -807,7 +807,7 @@ public class LocalShardsBalancer extends ShardsBalancer {
                 assert rn.nodeId().equals(shard.currentNodeId());
                 /* we skip relocating shards here since we expect an initializing shard with the same id coming in */
                 if ((RoutingPool.LOCAL_ONLY.equals(RoutingPool.getShardPool(shard, allocation))
-                    || (FeatureFlags.isEnabled(FeatureFlags.WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG) && isPartialShard(shard, allocation)))
+                    || (isPartialShard(shard, allocation) && FeatureFlags.isEnabled(FeatureFlags.WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG)))
                     && shard.state() != RELOCATING) {
                     node.addShard(shard);
                     ++totalShardCount;
